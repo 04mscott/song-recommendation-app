@@ -22,6 +22,24 @@ db_name = os.getenv("DB_NAME")
 youtube_key = os.getenv('YOUTUBE_KEY')
 
 
+
+def safe_api_call(url, headers, params=None, max_retries=3):
+    retries = 0
+    while retries < max_retries:
+        response = get(url, headers=headers, params=params)
+
+        if response.status_code == 200:
+            return json.loads(response.content)
+        elif response.status_code == 429:
+            retry_after = int(response.headers.get("Retry-After", 1))
+            retry_after = min(retry_after, 60)
+            print(f"Rate limited! Retrying after {retry_after} seconds...")
+            time.sleep(retry_after)
+            retries += 1
+        else:
+            print(f"Error {response.status_code}: {response.text}")
+            return None
+
 def get_auth_header(token):
     return {'Authorization': 'Bearer ' + token}
     
@@ -44,8 +62,20 @@ def connect_to_db():
 # Table 7: User <-> Artist Interactions
 def get_all_tables(token):
     headers = get_auth_header(token)
+
+    start_time = time.time()
+    try:
+        user = get_user_info(token)
+    except e:
+        print(f'Error: {e}')
+        return -1
+    end_time = time.time()
+    print(f'Completed in {end_time - start_time} seconds\n')
+
+    user_id = user['user_id'].iloc[0]
+
     result = {
-        'users': get_user_info(token),
+        'users': user,
         'songs': pd.DataFrame(columns=['song_id', 'title', 'img_url', 'preview_url']),
         'artists': pd.DataFrame(columns=['artist_id', 'name']),
         'artist_genres': pd.DataFrame(columns=['artist_id', 'genre']),
@@ -53,11 +83,7 @@ def get_all_tables(token):
         'user_artist_interactions': pd.DataFrame(columns=['user_id', 'artist_id', 'follows', 'top_artist']),
         'song_artist_interactions': pd.DataFrame(columns=['song_id', 'artist_id'])
     }
-    start_time = time.time()
-    user_id = result['users']['user_id'].iloc[0]
-    end_time = time.time()
-    print(f'Completed in {end_time - start_time} seconds\n')
-
+    
     start_time = time.time()
     result = get_top(token, headers, user_id, result)
     end_time = time.time()
@@ -78,7 +104,6 @@ def get_all_tables(token):
     end_time = time.time()
     print(f'Completed in {end_time - start_time} seconds\n')
 
-
     for key in result:
         result[key] = result[key].drop_duplicates()
         
@@ -96,12 +121,14 @@ def get_user_info(token):
 
     url = 'https://api.spotify.com/v1/me'
     headers = get_auth_header(token)
-    result = get(url=url, headers=headers)
-    json_result = json.loads(result.content)
+    json_response = safe_api_call(url=url, headers=headers)
+    if not json_response:
+        raise Exception('Error fetching user')
+
     return pd.DataFrame.from_dict({
-        'user_id': [json_result['id']], 
-        'email': [json_result['email']], 
-        'profile_img': [json_result['images'][0]['url'] if json_result['images'] != [] else None]
+        'user_id': [json_response['id']], 
+        'email': [json_response['email']], 
+        'profile_img': [json_response['images'][0]['url'] if json_response['images'] != [] else None]
     })
 
 def get_top(token, headers, user_id, result):
@@ -114,8 +141,10 @@ def get_top(token, headers, user_id, result):
         'limit': 50,
         'offset': 0
     }
-    response = get(url=url, headers=headers, params=params)
-    json_response = json.loads(response.content)
+
+    json_response = safe_api_call(url=url, headers=headers, params=params)
+    if not json_response:
+        return result
 
     songs_list = []
     artists_list = []
@@ -172,8 +201,9 @@ def get_all_saved_tracks(token, headers, user_id, result):
             'offset': 50 * count
         }
 
-        response = get(url=url, headers=headers, params=params)
-        json_response = json.loads(response.content)
+        json_response = safe_api_call(url=url, headers=headers, params=params)
+        if not json_response:
+            break
 
         if 'items' not in json_response or not json_response['items']:
             break
@@ -219,42 +249,31 @@ def get_all_playlist_tracks(token, headers, user_id, result):
             'limit': 50,
             'offset': 50 * count
         }
-        response = get(url=url, headers=headers, params=params)
-
-        if response.status_code == 200:
-            json_response = json.loads(response.content)
-        elif response.status_code == 429:
-            retry_after = int(response.headers.get("Retry-After", 5))  # Default to 5s if missing
-            print(f"Rate limited! Retrying after {retry_after} seconds...")
-            time.sleep(retry_after)
-        elif not response.content.strip():  # Ensure it's not empty
-            print("Warning: Empty response from API")
-            break
-        else:
-            print(f"Error: {response.status_code}, {response.text}")
-            break
-
-        if 'items' not in json_response or not json_response['items']:
+        json_response = safe_api_call(url=url, headers=headers, params=params)
+        if not json_response or 'items' not in json_response or not json_response['items']:
             break
 
         for i, item in enumerate(json_response['items']):
             playlist_count += 1
-            playlist_response = get(url=item['href'], headers=headers)
-            json_playlist_response = json.loads(playlist_response.content)
+
+            json_playlist_response = safe_api_call(url=url, headers=headers, params=params)
+            if not json_playlist_response:
+                break
+
             total_tracks = json_playlist_response['tracks']['total']
             tracks_url = json_playlist_response['tracks']['href']
 
             track_count = 0
             loops = 0
+
             while track_count < total_tracks:
                 params = {
                     'limit': 100,
                     'offset': 100 * loops
                 }
-                tracks_response = get(url=tracks_url, headers=headers, params=params)
-                json_tracks_response = json.loads(tracks_response.content)
-                    
-                if 'items' not in json_tracks_response or not json_tracks_response['items']:
+                
+                json_tracks_response = safe_api_call(url=tracks_url, headers=headers, params=params)
+                if not json_tracks_response or 'items' not in json_tracks_response or not json_tracks_response['items']:
                     break
 
                 songs_list = []
@@ -265,8 +284,10 @@ def get_all_playlist_tracks(token, headers, user_id, result):
                 for item in json_tracks_response['items']:
                     if track_count >= total_tracks:
                         break
-                    if item.get('track') and item['track'].get('name') and item['track'].get('artists'):
-                        track = item['track']
+                            
+                    track = item['track']
+                    if track and track.get('id') and track.get('name') and track.get('artists'):
+                        
                         songs_list.append([track['id'], track['name'], track['album']['images'][0]['url'], None]) # Add song to df
 
                         # Add User Song Interactions (checking to see if already in table)
@@ -403,12 +424,12 @@ def get_preview(song_name, artist_name):
 if __name__=='__main__':
     USER = False
     GENRE = False
-    TABLES = True
+    TABLES = False
     CONNECT = False
     YOUTUBE = False
     TOP = False
     SAVED = False
-    PLAYLIST = False
+    PLAYLIST = True
     FOLLOWS = False
 
     test_token = os.getenv('USER_TEST_TOKEN')
