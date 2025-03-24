@@ -1,0 +1,11 @@
+numpy
+dotenv
+flask
+flask-cors
+requests
+jsonify
+pandas
+mysql.connector
+sqlalchemy
+celery
+redis
