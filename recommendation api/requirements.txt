@@ -9,3 +9,4 @@ mysql.connector
 sqlalchemy
 celery
 redis
+pymysql
